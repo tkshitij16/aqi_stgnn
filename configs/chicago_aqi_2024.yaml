@@ -1,0 +1,74 @@
+data:
+  master_csv_path: "data/stt_master_locked_2024.csv"
+
+  timezone: "America/Chicago"
+  time_col: "epoch"
+  node_col: "node_id"
+  lon_col: "lon"
+  lat_col: "lat"
+  pm25_col: "pm25_obs"
+  aqi_col:  "aqi_obs"
+
+  # Dynamics from your locked CSV (no other fields required)
+  dynamic_cols:
+    - "U"
+    - "theta"
+    - "PBLH"
+    - "T"
+    - "RH"
+    - "precip"
+    - "congestion"
+
+  # Statics from your locked CSV
+  static_cols:
+    - "ndvi_z"
+    - "p_impervious"
+    - "p_water"
+    - "p_wetland"
+    - "p_grass"
+    - "p_cultivated"
+    - "p_pasture"
+    - "p_barren"
+
+  temporal_window: 24
+  stride_hours: 1
+  min_obs_per_hour: 1
+
+  # Local (Chicago) wall-time split; internally converted to epoch
+  train_hours: ["2024-01-01 00:00", "2024-10-31 23:00"]
+  val_hours:   ["2024-11-01 00:00", "2024-11-30 23:00"]
+  test_hours:  ["2024-12-01 00:00", "2024-12-31 23:00"]
+
+physics:
+  use_wind: true
+  use_pblh: true          # set false if PBLH is mostly missing
+  wind_align_gamma: 2.0
+  beta_weight: 0.7
+  knn_k: 8
+  dist_length_scale_m: 500.0
+  row_normalize: true
+
+training:
+  task: "aqi"             # "aqi" | "pm25" | "both"
+  batch_hours: 8
+  epochs: 100
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  seed: 42
+  device: "cuda"          # "cuda" or "cpu"
+
+model:
+  dyn_dim: 7              # = len(dynamic_cols)
+  static_dim: 8           # = len(static_cols)
+  gru_hidden: 64
+  gnn_hidden: 64
+  gnn_layers: 2
+  dropout: 0.2
+
+outputs:
+  work_dir: "outputs"
+  model_file: "outputs/model.pt"
+  scaler_file: "outputs/scalers.npz"
+  pred_csv: "outputs/preds_2024.csv"
+  pred_csv_with_time: "outputs/preds_2024_with_time.csv"
+  metrics_csv: "tables/metrics.csv"

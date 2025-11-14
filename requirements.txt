@@ -1,0 +1,14 @@
+
+---
+
+# File 2: `aqi_stgnn/requirements.txt`
+
+```text
+numpy
+pandas
+pyyaml
+scikit-learn
+matplotlib
+torch>=2.1
+torch-geometric>=2.4
+tqdm

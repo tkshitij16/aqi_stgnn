@@ -1,0 +1,12 @@
+@"
+# Ignore large data files
+data/**/*.csv
+AQI_STGNN/data/**/*.csv
+outputs/**/*.csv
+
+# Python junk
+__pycache__/
+*.pyc
+.venv/
+.env
+"@ | Set-Content .gitignore
