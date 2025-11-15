@@ -48,7 +48,15 @@ def main():
     train_df, val_df, _ = split_df(df, cfg)
 
     train_ds = STTDataset(train_df, cfg, fit_scalers=True, verbose=True)
-    val_ds   = STTDataset(val_df, cfg, dyn_scaler=train_ds.dyn_scaler, stat_scaler=train_ds.stat_scaler, fit_scalers=False, verbose=False)
+    val_ds   = STTDataset(
+        val_df,
+        cfg,
+        dyn_scaler=train_ds.dyn_scaler,
+        stat_scaler=train_ds.stat_scaler,
+        target_stats=train_ds.target_stats,
+        fit_scalers=False,
+        verbose=False,
+    )
 
     model = STTGNN(
         dyn_dim=train_ds.Ddyn,
@@ -110,7 +118,12 @@ def main():
         if va_avg < best_val:
             best_val = va_avg
             torch.save(model.state_dict(), cfg["outputs"]["model_file"])
-            save_scalers(cfg["outputs"]["scaler_file"], train_ds.dyn_scaler, train_ds.stat_scaler)
+            save_scalers(
+                cfg["outputs"]["scaler_file"],
+                train_ds.dyn_scaler,
+                train_ds.stat_scaler,
+                train_ds.target_stats,
+            )
             log.info(f"[Checkpoint] Saved best model → {cfg['outputs']['model_file']} | scalers → {cfg['outputs']['scaler_file']}")
 
 if __name__ == "__main__":
