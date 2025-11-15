@@ -12,3 +12,4 @@ matplotlib
 torch>=2.1
 torch-geometric>=2.4
 tqdm
+requests

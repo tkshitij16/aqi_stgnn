@@ -54,18 +54,62 @@ def fit_scalers(train_dyn, train_stat):
     stat_scaler.fit(train_stat)
     return dyn_scaler, stat_scaler
 
-def save_scalers(path, dyn_scaler, stat_scaler):
+def save_scalers(path, dyn_scaler, stat_scaler, target_stats=None):
+    """Persist feature/target scaling parameters for later reuse.
+
+    Parameters
+    ----------
+    path : str
+        Destination NPZ file path.
+    dyn_scaler : sklearn.preprocessing.StandardScaler
+        Fitted scaler for dynamic features.
+    stat_scaler : sklearn.preprocessing.StandardScaler
+        Fitted scaler for static features.
+    target_stats : Optional[Dict[str, Dict[str, float]]]
+        Mapping like ``{"aqi": {"mean": μ, "std": σ}}`` describing how
+        targets were standardised. Stored so that downstream prediction
+        scripts can invert the transform back to physical units.
+    """
+
     ensure_dir(path)
-    np.savez(path,
-             dyn_mean=dyn_scaler.mean_, dyn_scale=dyn_scaler.scale_,
-             stat_mean=stat_scaler.mean_, stat_scale=stat_scaler.scale_)
+    payload = dict(
+        dyn_mean=dyn_scaler.mean_,
+        dyn_scale=dyn_scaler.scale_,
+        stat_mean=stat_scaler.mean_,
+        stat_scale=stat_scaler.scale_,
+    )
+
+    if target_stats:
+        keys = list(target_stats.keys())
+        payload["target_keys"] = np.array(keys, dtype="U16")
+        payload["target_mean"] = np.array([target_stats[k]["mean"] for k in keys], dtype="float64")
+        payload["target_scale"] = np.array([target_stats[k]["std"] for k in keys], dtype="float64")
+
+    np.savez(path, **payload)
+
 
 def load_scalers(path):
+    """Load feature/target scaling parameters saved via :func:`save_scalers`."""
+
     z = np.load(path)
-    ds = StandardScaler(); ss = StandardScaler()
-    ds.mean_ = z["dyn_mean"]; ds.scale_ = z["dyn_scale"]
-    ss.mean_ = z["stat_mean"]; ss.scale_ = z["stat_scale"]
-    return ds, ss
+    ds = StandardScaler()
+    ss = StandardScaler()
+    ds.mean_ = z["dyn_mean"]
+    ds.scale_ = z["dyn_scale"]
+    ss.mean_ = z["stat_mean"]
+    ss.scale_ = z["stat_scale"]
+
+    target_stats = {}
+    if "target_keys" in z.files:
+        keys = z["target_keys"].tolist()
+        means = z["target_mean"].astype(float)
+        scales = z["target_scale"].astype(float)
+        for key, mu, sd in zip(keys, means, scales):
+            if not np.isfinite(sd) or sd == 0.0:
+                sd = 1.0
+            target_stats[str(key)] = {"mean": float(mu), "std": float(sd)}
+
+    return ds, ss, target_stats
 
 # ---------- metrics ----------
 def rmse(yhat, y, mask=None):
