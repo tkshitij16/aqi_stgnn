@@ -63,6 +63,7 @@ import matplotlib.patches as mpatches
 import matplotlib as mpl
 
 import geopandas as gpd
+from shapely.geometry import box
 from shapely.ops import unary_union
 
 # Optional basemap + PDF merger
@@ -134,17 +135,32 @@ def week_key_local(epoch_series, tz="America/Chicago"):
 
 
 def maybe_alias_metric(df, name: str) -> str:
-    aliases = {
-        "aqi_pred": "aqi_hat",
-        "aqi": "aqi_hat",
-        "pm25_pred": "pm25_hat",
-        "pm25": "pm25_hat",
+    """Return the first available column compatible with *name*."""
+    alias_graph = {
+        "aqi_hat": ["aqi_pred", "aqi"],
+        "aqi_pred": ["aqi_hat", "aqi"],
+        "aqi": ["aqi_hat", "aqi_pred"],
+        "pm25_hat": ["pm25_pred", "pm25"],
+        "pm25_pred": ["pm25_hat", "pm25"],
+        "pm25": ["pm25_hat", "pm25_pred"],
     }
-    if name in df.columns:
-        return name
-    if name in aliases and aliases[name] in df.columns:
-        log.warning(f"[Metric] '{name}' not found; using '{aliases[name]}'")
-        return aliases[name]
+
+    seen = set()
+    queue = [name]
+    while queue:
+        candidate = queue.pop(0)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in df.columns:
+            if candidate != name:
+                log.warning(
+                    "[Metric] '%s' unavailable; using '%s' instead.", name, candidate
+                )
+            return candidate
+        for nxt in alias_graph.get(candidate, []):
+            if nxt not in seen:
+                queue.append(nxt)
     return name
 
 
@@ -348,7 +364,12 @@ REGIONS = {
 # -------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pred-csv", required=True)
+    ap.add_argument(
+        "--pred-csv",
+        default=None,
+        help="Predictions CSV. If omitted and master contains aqi_pred/pm25_pred,"
+        " those columns are used instead.",
+    )
     ap.add_argument("--master-csv", required=True)
     ap.add_argument("--boundary", required=True)
     ap.add_argument(
@@ -376,16 +397,6 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # ---- Predictions ----
-    dfp = pd.read_csv(args.pred_csv, low_memory=False)
-    for col in ["epoch", "node_id"]:
-        if col not in dfp.columns:
-            raise ValueError(f"Missing '{col}' in predictions.")
-    dfp["node_id"] = dfp["node_id"].astype(str)
-    dfp["epoch"] = pd.to_numeric(dfp["epoch"], errors="coerce").astype("Int64")
-
-    args.metric = maybe_alias_metric(dfp, args.metric)
-
     # ---- Master with drivers & lat/lon ----
     head = pd.read_csv(args.master_csv, nrows=0)
     usecols = [
@@ -403,7 +414,15 @@ def main():
             "congestion",
             "ndvi_z",
             "p_impervious",
+            "p_water",
+            "p_wetland",
+            "p_grass",
+            "p_cultivated",
+            "p_pasture",
+            "p_barren",
             "aqi_obs",
+            "aqi_pred",
+            "pm25_pred",
         ]
         if c in head.columns
     ]
@@ -417,6 +436,34 @@ def main():
 
     # Node-level static lat/lon lookup (one row per node)
     nodes_ll = dfm[["node_id", "lat", "lon"]].dropna(subset=["lat", "lon"]).drop_duplicates("node_id")
+
+    # ---- Predictions ----
+    has_master_preds = {"aqi_pred", "pm25_pred"}.issubset(dfm.columns)
+    if has_master_preds:
+        log.info("[Predictions] Using master CSV columns aqi_pred/pm25_pred for dashboards.")
+        dfp = dfm[["epoch", "node_id", "aqi_pred", "pm25_pred", "lat", "lon"]].copy()
+        dfp = dfp.rename(columns={"aqi_pred": "aqi_hat", "pm25_pred": "pm25_hat"})
+    else:
+        if not args.pred_csv:
+            raise ValueError(
+                "Master CSV lacks aqi_pred/pm25_pred columns and --pred-csv was not provided."
+            )
+        dfp = pd.read_csv(args.pred_csv, low_memory=False)
+        for col in ["epoch", "node_id"]:
+            if col not in dfp.columns:
+                raise ValueError(f"Missing '{col}' in predictions.")
+        dfp["node_id"] = dfp["node_id"].astype(str)
+        dfp["epoch"] = pd.to_numeric(dfp["epoch"], errors="coerce").astype("Int64")
+        dfp = dfp.merge(nodes_ll, on="node_id", how="left")
+        missing_ll = dfp["lat"].isna() | dfp["lon"].isna()
+        if missing_ll.any():
+            log.warning(
+                "[Predictions] Dropping %d rows without lat/lon after merge.",
+                int(missing_ll.sum()),
+            )
+            dfp = dfp[~missing_ll].copy()
+
+    args.metric = maybe_alias_metric(dfp, args.metric)
 
     # Add aqi_obs to predictions if not present
     if "aqi_obs" in dfm.columns and "aqi_obs" not in dfp.columns:
@@ -566,23 +613,23 @@ def main():
                 }
             )
 
-            fig = plt.figure(figsize=(11.0, 8.5))
+            fig = plt.figure(figsize=(11.2, 8.5))
             gs = gridspec.GridSpec(
-                3,
                 4,
-                height_ratios=[0.12, 1.0, 0.65],
-                width_ratios=[1, 1, 1, 0.9],
-                hspace=0.35,
-                wspace=0.18,
+                12,
+                height_ratios=[0.6, 0.9, 3.6, 2.8],
+                width_ratios=[1, 1, 1, 1, 1, 0.7, 0.7, 1, 1, 1, 1, 1],
+                hspace=0.32,
+                wspace=0.25,
             )
 
-            # Title
-            axT = fig.add_subplot(gs[0, 0:4])
-            axT.axis("off")
+            # Title row
+            axTitle = fig.add_subplot(gs[0, :])
+            axTitle.axis("off")
             title_txt = f"{name} — Street-level AQI dashboard | {wk_start} to {wk_end}"
-            axT.text(
+            axTitle.text(
                 0.01,
-                0.5,
+                0.65,
                 title_txt,
                 ha="left",
                 va="center",
@@ -590,129 +637,137 @@ def main():
                 weight="bold",
             )
 
-            # Map
-            axMap = fig.add_subplot(gs[1, 0:3])
+            # Weekly inference row
+            axInf = fig.add_subplot(gs[1, :])
+            axInf.axis("off")
+            axInf.text(
+                0.01,
+                0.95,
+                "Weekly inference:",
+                fontsize=11,
+                weight="bold",
+                va="top",
+            )
+            inf_y = 0.72
+            axInf.text(
+                0.02,
+                inf_y,
+                climate_summary,
+                fontsize=9.6,
+                va="top",
+                wrap=True,
+            )
+            if climate_dyn:
+                axInf.text(
+                    0.02,
+                    inf_y - 0.32,
+                    climate_dyn,
+                    fontsize=9.3,
+                    va="top",
+                    wrap=True,
+                )
+
+            # Core visual row: map, legend, drivers
+            axMap = fig.add_subplot(gs[2, 0:6])
+            axLeg = fig.add_subplot(gs[2, 6:8])
+            axDrv = fig.add_subplot(gs[2, 8:12])
+
             sub_gdf = gpd.GeoDataFrame(
                 reg_df,
                 geometry=gpd.points_from_xy(reg_df["lon"], reg_df["lat"]),
                 crs="EPSG:4326",
             )
-            bnd.boundary.plot(ax=axMap, color="lightgray", linewidth=0.8, zorder=1)
 
-            axMap.set_xlim(min_lon, max_lon)
-            axMap.set_ylim(min_lat, max_lat)
+            # Bounding box polygon for framing the basemap nicely
+            region_poly = gpd.GeoDataFrame(
+                geometry=[box(min_lon, min_lat, max_lon, max_lat)], crs="EPSG:4326"
+            )
 
             if _CX_OK:
                 sub_web = to_metric(sub_gdf)
+                bnd_web = to_metric(bnd)
+                reg_web = to_metric(region_poly)
+                bnd_web.boundary.plot(ax=axMap, color="#cccccc", linewidth=0.6, zorder=1)
                 cx.add_basemap(
                     axMap,
                     crs=sub_web.crs,
-                    source=cx.providers.Stamen.TonerLite,
-                    alpha=0.7,
+                    source=cx.providers.CartoDB.Positron,
+                    attribution=False,
+                    alpha=0.98,
                 )
-                xs = sub_web.geometry.x
-                ys = sub_web.geometry.y
                 cmap_cat_local, norm_cat_local = aqi_category_cmap()
                 axMap.scatter(
-                    xs,
-                    ys,
+                    sub_web.geometry.x,
+                    sub_web.geometry.y,
                     c=sub_gdf[pred_col].values,
                     cmap=cmap_cat_local,
                     norm=norm_cat_local,
-                    s=35,
+                    s=40,
                     edgecolors="black",
-                    linewidths=0.3,
+                    linewidths=0.35,
                     alpha=0.95,
                     zorder=5,
                 )
+                bounds = reg_web.total_bounds
+                axMap.set_xlim(bounds[0], bounds[2])
+                axMap.set_ylim(bounds[1], bounds[3])
                 axMap.set_axis_off()
             else:
+                bnd.boundary.plot(ax=axMap, color="#cccccc", linewidth=0.8, zorder=1)
                 sc = axMap.scatter(
                     sub_gdf.geometry.x,
                     sub_gdf.geometry.y,
                     c=sub_gdf[pred_col].values,
                     cmap=cmap_cat,
                     norm=norm_cat,
-                    s=35,
+                    s=40,
                     edgecolors="black",
-                    linewidths=0.3,
+                    linewidths=0.35,
                     alpha=0.95,
                 )
+                axMap.set_xlim(min_lon, max_lon)
+                axMap.set_ylim(min_lat, max_lat)
                 axMap.set_xlabel("Longitude")
                 axMap.set_ylabel("Latitude")
 
             axMap.set_title("Weekly mean AQI at nodes (street scale)")
 
-            # Drivers panel
-            axDrv = fig.add_subplot(gs[1, 3])
+            aqi_category_legend(axLeg)
+            axLeg.set_title("AQI colour key", fontsize=9.5)
+
             labels_drv = [lab for _, lab, _ in driver_info]
             vals_drv = [r for _, _, r in driver_info]
             y_pos = np.arange(len(labels_drv))
-            axDrv.barh(y_pos, vals_drv, height=0.65)
+            axDrv.barh(y_pos, vals_drv, height=0.6, color="#5c6bc0")
             axDrv.set_yticks(y_pos)
-            axDrv.set_yticklabels(labels_drv, fontsize=7)
+            axDrv.set_yticklabels(labels_drv, fontsize=7.5)
             axDrv.set_xlim(-1.0, 1.0)
+            axDrv.axvline(0.0, color="#444444", linewidth=0.6)
             axDrv.set_xlabel("Corr (r)")
             axDrv.set_title("Drivers of spatial variation")
-            axDrv.grid(axis="x", linestyle=":", linewidth=0.6)
+            axDrv.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.8)
 
-            # Legend + inference
-            axLeg = fig.add_subplot(gs[2, 3])
-            aqi_category_legend(axLeg)
-
-            axTxt = fig.add_subplot(gs[2, 0:3])
+            # Driver-wise interpretation panel
+            axTxt = fig.add_subplot(gs[3, :])
             axTxt.axis("off")
-            y0 = 0.95
             axTxt.text(
                 0.01,
-                y0,
-                "Weekly inference:",
-                fontsize=11,
+                0.94,
+                "Driver-wise interpretation:",
+                fontsize=10.5,
                 weight="bold",
                 va="top",
             )
-            y = y0 - 0.12
+            bullets = [f"• {sent}" for sent in driver_sentences if sent]
+            body = "\n\n".join(bullets) if bullets else "No statistically robust driver signals this week."
             axTxt.text(
                 0.02,
-                y,
-                climate_summary,
-                fontsize=9.5,
+                0.88,
+                body,
+                fontsize=9.2,
                 va="top",
                 wrap=True,
             )
-            if climate_dyn:
-                y -= 0.11
-                axTxt.text(
-                    0.02,
-                    y,
-                    climate_dyn,
-                    fontsize=9.5,
-                    va="top",
-                    wrap=True,
-                )
-
-            y -= 0.13
-            axTxt.text(
-                0.02,
-                y,
-                "Driver-wise interpretation:",
-                fontsize=10,
-                weight="bold",
-                va="top",
-            )
-            y -= 0.08
-            for sent in driver_sentences:
-                if y < 0.05:
-                    break
-                axTxt.text(
-                    0.03,
-                    y,
-                    "• " + sent,
-                    fontsize=9,
-                    va="top",
-                    wrap=True,
-                )
-                y -= 0.10
 
             out_pdf = os.path.join(tmpdir, f"local_{wk}_{region_id}.pdf")
             fig.savefig(out_pdf, dpi=300)

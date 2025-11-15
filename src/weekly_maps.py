@@ -113,17 +113,28 @@ def attach_lonlat(df, nodes_csv_or_master):
     return out
 
 def maybe_alias_metric(df, name):
-    aliases = {
-        "aqi_pred": "aqi_hat",
-        "aqi": "aqi_hat",
-        "pm25_pred": "pm25_hat",
-        "pm25": "pm25_hat",
+    alias_graph = {
+        "aqi_hat": ["aqi_pred", "aqi"],
+        "aqi_pred": ["aqi_hat", "aqi"],
+        "aqi": ["aqi_hat", "aqi_pred"],
+        "pm25_hat": ["pm25_pred", "pm25"],
+        "pm25_pred": ["pm25_hat", "pm25"],
+        "pm25": ["pm25_hat", "pm25_pred"],
     }
-    if name in df.columns:
-        return name
-    if name in aliases and aliases[name] in df.columns:
-        log.warning(f"[Metric] '{name}' not found; using '{aliases[name]}'")
-        return aliases[name]
+    seen = set()
+    queue = [name]
+    while queue:
+        candidate = queue.pop(0)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in df.columns:
+            if candidate != name:
+                log.warning("[Metric] '%s' unavailable; using '%s' instead.", name, candidate)
+            return candidate
+        for nxt in alias_graph.get(candidate, []):
+            if nxt not in seen:
+                queue.append(nxt)
     return name
 
 def agg_points_to_hex(points_gdf, hex_gdf, val_col):
@@ -154,7 +165,12 @@ def corr_bar(ax, aqi, features_dict):
 # ------------- main -------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pred-csv", required=True)
+    ap.add_argument(
+        "--pred-csv",
+        default=None,
+        help="Predictions CSV. If omitted and master contains aqi_pred/pm25_pred,"
+        " those columns are used.",
+    )
     ap.add_argument("--nodes-csv", default="data/stt_master_locked_2024.csv",
                     help="For lon/lat if predictions lack them")
     ap.add_argument("--master-csv", default="data/stt_master_locked_2024.csv",
@@ -171,23 +187,71 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     os.makedirs(args.tables_dir, exist_ok=True)
 
-    # Load predictions
-    df = pd.read_csv(args.pred_csv, low_memory=False)
-    if "epoch" not in df.columns: raise ValueError("Missing 'epoch' in predictions.")
-    if "node_id" not in df.columns: raise ValueError("Missing 'node_id' in predictions.")
-    df["node_id"] = df["node_id"].astype(str)
-    df["epoch"] = pd.to_numeric(df["epoch"], errors="coerce").astype("Int64")
+    # Load master once for features and metadata
+    master_head = pd.read_csv(args.master_csv, nrows=0)
+    base_cols = [
+        "epoch",
+        "node_id",
+        "lon",
+        "lat",
+        "U",
+        "PBLH",
+        "congestion",
+        "ndvi_z",
+        "p_impervious",
+        "p_water",
+        "p_wetland",
+        "p_grass",
+        "p_cultivated",
+        "p_pasture",
+        "p_barren",
+        "aqi_obs",
+        "aqi_pred",
+        "pm25_pred",
+    ]
+    usecols = [c for c in base_cols if c in master_head.columns]
+    master = pd.read_csv(args.master_csv, usecols=usecols, low_memory=False)
+    master["node_id"] = master["node_id"].astype(str)
+    master["epoch"] = pd.to_numeric(master["epoch"], errors="coerce").astype("Int64")
+    master["VC"] = (
+        pd.to_numeric(master.get("U"), errors="coerce")
+        * pd.to_numeric(master.get("PBLH"), errors="coerce")
+    )
+
+    has_master_preds = {"aqi_pred", "pm25_pred"}.issubset(master.columns)
+
+    # Load predictions (from master when available)
+    if has_master_preds and not args.pred_csv:
+        log.info("[Predictions] Using aqi_pred/pm25_pred from master CSV.")
+        df = master[["epoch", "node_id", "aqi_pred", "pm25_pred", "lon", "lat"]].copy()
+        df = df.rename(columns={"aqi_pred": "aqi_hat", "pm25_pred": "pm25_hat"})
+    else:
+        if not args.pred_csv:
+            raise ValueError(
+                "Master CSV lacks prediction columns and --pred-csv was not supplied."
+            )
+        df = pd.read_csv(args.pred_csv, low_memory=False)
+        if "epoch" not in df.columns:
+            raise ValueError("Missing 'epoch' in predictions.")
+        if "node_id" not in df.columns:
+            raise ValueError("Missing 'node_id' in predictions.")
+        df["node_id"] = df["node_id"].astype(str)
+        df["epoch"] = pd.to_numeric(df["epoch"], errors="coerce").astype("Int64")
+        if ("lon" not in df.columns) or ("lat" not in df.columns):
+            nodes_lookup = master[["node_id", "lon", "lat"]].dropna(subset=["lon", "lat"]).drop_duplicates("node_id")
+            df = df.merge(nodes_lookup, on="node_id", how="left")
+            missing_ll = df["lat"].isna() | df["lon"].isna()
+            if missing_ll.any():
+                log.warning(
+                    "[Predictions] Dropping %d rows without lat/lon after join.",
+                    int(missing_ll.sum()),
+                )
+                df = df[~missing_ll].copy()
 
     # Metric aliasing
     args.metric = maybe_alias_metric(df, args.metric)
 
-    # If user asked for 'aqi_obs' but it's not in predictions, we will source from master later
-    need_obs_from_master = (args.metric == "aqi_obs" and "aqi_obs" not in df.columns)
-
-    # Attach lon/lat if missing
-    src_nodes = args.nodes_csv if args.nodes_csv else args.master_csv
-    if ("lon" not in df.columns) or ("lat" not in df.columns):
-        df = attach_lonlat(df, src_nodes)
+    need_obs_from_master = args.metric == "aqi_obs" and "aqi_obs" not in df.columns
 
     # Build week label
     df["week"] = week_key_local(df["epoch"])
@@ -197,18 +261,27 @@ def main():
     hex_grid = hex_grid_shapely(bnd, hex_edge_m=args.hex_edge_m)
 
     # Load features from master for correlation panel
-    feat_cols = ["epoch","node_id","U","PBLH","congestion","ndvi_z","p_impervious","lon","lat"]
-    dfm = pd.read_csv(args.master_csv, usecols=[c for c in feat_cols if c in pd.read_csv(args.master_csv, nrows=0).columns],
-                      low_memory=False)
-    for c in ["epoch","node_id"]: 
-        if c not in dfm.columns: raise ValueError(f"Column '{c}' missing in master CSV.")
+    feat_cols = [
+        "epoch",
+        "node_id",
+        "U",
+        "PBLH",
+        "congestion",
+        "ndvi_z",
+        "p_impervious",
+        "VC",
+    ]
+    dfm = master[[c for c in feat_cols if c in master.columns]].copy()
+    for c in ["epoch", "node_id"]:
+        if c not in dfm.columns:
+            raise ValueError(f"Column '{c}' missing in master CSV.")
     dfm["node_id"] = dfm["node_id"].astype(str)
     dfm["epoch"] = pd.to_numeric(dfm["epoch"], errors="coerce").astype("Int64")
-    if "U" not in dfm.columns or "PBLH" not in dfm.columns:
-        log.warning("[Master] Missing U or PBLH; ventilation will be NaN.")
-        dfm["U"] = pd.to_numeric(dfm.get("U", np.nan))
-        dfm["PBLH"] = pd.to_numeric(dfm.get("PBLH", np.nan))
-    dfm["VC"] = pd.to_numeric(dfm.get("U"), errors="coerce") * pd.to_numeric(dfm.get("PBLH"), errors="coerce")
+    if "VC" not in dfm.columns:
+        dfm["VC"] = (
+            pd.to_numeric(dfm.get("U"), errors="coerce")
+            * pd.to_numeric(dfm.get("PBLH"), errors="coerce")
+        )
     # week for master
     dfm["week"] = week_key_local(dfm["epoch"])
 
