@@ -71,4 +71,5 @@ outputs:
   scaler_file: "outputs/scalers.npz"
   pred_csv: "outputs/preds_2024.csv"
   pred_csv_with_time: "outputs/preds_2024_with_time.csv"
+  master_with_preds: "outputs/stt_master_locked_2024_with_preds.csv"
   metrics_csv: "tables/metrics.csv"

@@ -134,17 +134,30 @@ def week_key_local(epoch_series, tz="America/Chicago"):
 
 
 def maybe_alias_metric(df, name: str) -> str:
-    aliases = {
-        "aqi_pred": "aqi_hat",
-        "aqi": "aqi_hat",
-        "pm25_pred": "pm25_hat",
-        "pm25": "pm25_hat",
+    alias_graph = {
+        "aqi_hat": ["aqi_pred", "aqi"],
+        "aqi_pred": ["aqi_hat", "aqi"],
+        "aqi": ["aqi_hat", "aqi_pred"],
+        "pm25_hat": ["pm25_pred", "pm25"],
+        "pm25_pred": ["pm25_hat", "pm25"],
+        "pm25": ["pm25_hat", "pm25_pred"],
     }
-    if name in df.columns:
-        return name
-    if name in aliases and aliases[name] in df.columns:
-        log.warning(f"[Metric] '{name}' not found; using '{aliases[name]}'")
-        return aliases[name]
+    seen = set()
+    queue = [name]
+    while queue:
+        candidate = queue.pop(0)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in df.columns:
+            if candidate != name:
+                log.warning(
+                    "[Metric] '%s' unavailable; using '%s' instead.", name, candidate
+                )
+            return candidate
+        for nxt in alias_graph.get(candidate, []):
+            if nxt not in seen:
+                queue.append(nxt)
     return name
 
 
