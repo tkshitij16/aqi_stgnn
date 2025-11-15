@@ -58,7 +58,7 @@ physics:
 training:
   task: "aqi"             # "aqi" | "pm25" | "both"
   batch_hours: 8
-  epochs: 30
+  epochs: 200
   lr: 1.0e-3
   weight_decay: 1.0e-4
   seed: 42

@@ -30,6 +30,7 @@ OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/era5"
 TRAFFIC_URL = "https://data.cityofchicago.org/resource/sxs8-h27x.json"
 OPENAQ_URL = "https://api.openaq.org/v2/measurements"
 
+
 def configure_logging(level: int = logging.INFO) -> None:
     if LOG.handlers:
         return
@@ -111,7 +112,9 @@ def hourly_range(start_local: str, end_local: str) -> pd.DatetimeIndex:
     return pd.date_range(start, end, freq="H", tz="America/Chicago").tz_convert("UTC")
 
 
-def chunk_bounds(index: pd.DatetimeIndex, days: int) -> Iterator[Tuple[Timestamp, Timestamp]]:
+def chunk_bounds(
+    index: pd.DatetimeIndex, days: int
+) -> Iterator[Tuple[Timestamp, Timestamp]]:
     if index.empty:
         return
     start = index[0]
@@ -135,7 +138,9 @@ def request_with_retries(
             resp = session.get(url, params=params, timeout=90)
             if resp.status_code == 200:
                 return resp.json()
-            LOG.warning("Request failed %s (%s): %s", url, resp.status_code, resp.text[:200])
+            LOG.warning(
+                "Request failed %s (%s): %s", url, resp.status_code, resp.text[:200]
+            )
         except requests.RequestException as exc:  # pragma: no cover - network guard
             LOG.warning("Exception during request: %s", exc)
         time.sleep(sleep * (attempt + 1))
@@ -158,7 +163,7 @@ def fetch_weather(
             "start_date": chunk_start.strftime("%Y-%m-%d"),
             "end_date": chunk_end.strftime("%Y-%m-%d"),
             "hourly": (
-                "temperature_2m,relative_humidity_2m,precipitation,"\
+                "temperature_2m,relative_humidity_2m,precipitation,"
                 "windspeed_10m,winddirection_10m,planetary_boundary_layer_height"
             ),
             "timezone": "UTC",
@@ -185,7 +190,9 @@ def fetch_weather(
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         frames.append(frame)
     if not frames:
-        return pd.DataFrame(columns=["timestamp", "U", "theta", "PBLH", "T", "RH", "precip"])
+        return pd.DataFrame(
+            columns=["timestamp", "U", "theta", "PBLH", "T", "RH", "precip"]
+        )
     result = pd.concat(frames, ignore_index=True)
     result = result.drop_duplicates(subset="timestamp").sort_values("timestamp")
     result.set_index("timestamp", inplace=True)
@@ -221,7 +228,9 @@ def fetch_congestion(
         attempt_params = params.copy()
         for attempt in range(4):
             try:
-                resp = session.get(TRAFFIC_URL, params=attempt_params, headers=headers, timeout=90)
+                resp = session.get(
+                    TRAFFIC_URL, params=attempt_params, headers=headers, timeout=90
+                )
                 if resp.status_code == 200:
                     payload = resp.json()
                     break
@@ -240,8 +249,12 @@ def fetch_congestion(
         if "bucket" not in frame.columns:
             continue
         frame.rename(columns={"bucket": "timestamp"}, inplace=True)
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
-        frame["congestion"] = pd.to_numeric(frame.get("congestion"), errors="coerce")
+        frame["timestamp"] = pd.to_datetime(
+            frame["timestamp"], utc=True, errors="coerce"
+        )
+        frame["congestion"] = pd.to_numeric(
+            frame.get("congestion"), errors="coerce"
+        )
         frame = frame.dropna(subset=["timestamp"])
         frames.append(frame)
     if not frames:
@@ -278,7 +291,9 @@ def fetch_pm25(
                 if resp.status_code == 200:
                     payload = resp.json()
                     break
-                LOG.warning("[openaq] HTTP %s: %s", resp.status_code, resp.text[:200])
+                LOG.warning(
+                    "[openaq] HTTP %s: %s", resp.status_code, resp.text[:200]
+                )
             except requests.RequestException as exc:  # pragma: no cover
                 LOG.warning("[openaq] exception %s", exc)
             time.sleep(sleep * (attempt + 1))
@@ -294,7 +309,12 @@ def fetch_pm25(
             value = row.get("value")
             if ts is None or value is None:
                 continue
-            records.append({"timestamp": pd.to_datetime(ts, utc=True), "pm25_obs": float(value)})
+            records.append(
+                {
+                    "timestamp": pd.to_datetime(ts, utc=True),
+                    "pm25_obs": float(value),
+                }
+            )
         if records:
             frame = pd.DataFrame(records)
             frames.append(frame)
@@ -316,6 +336,7 @@ def compute_aqi_from_pm25(pm25: pd.Series) -> pd.Series:
         (250.5, 350.4, 301, 400),
         (350.5, 500.4, 401, 500),
     ]
+
     def aqi_single(val: float) -> float:
         if not math.isfinite(val):
             return math.nan
@@ -323,6 +344,7 @@ def compute_aqi_from_pm25(pm25: pd.Series) -> pd.Series:
             if c_low <= val <= c_high:
                 return (a_high - a_low) / (c_high - c_low) * (val - c_low) + a_low
         return 500.0
+
     return pm25.apply(aqi_single)
 
 
@@ -355,26 +377,36 @@ def fetch_vegetation(node: NodeConfig, years: Sequence[int]) -> Dict[int, Dict]:
                 pause=0.5,
             )
         except Exception as exc:  # pragma: no cover - network failures
-            LOG.warning("[veg] NDVI fetch failed for %s (%s): %s", node.node_id, year, exc)
+            LOG.warning(
+                "[veg] NDVI fetch failed for %s (%s): %s", node.node_id, year, exc
+            )
             ndvi_series = {}
         try:
             lc_class = fetch_landcover_class(node.lat, node.lon, year, 0.5)
             fractions = landcover_fractions(lc_class)
             last_fractions = fractions
         except Exception as exc:  # pragma: no cover
-            LOG.warning("[veg] Landcover fetch failed for %s (%s): %s", node.node_id, year, exc)
+            LOG.warning(
+                "[veg] Landcover fetch failed for %s (%s): %s",
+                node.node_id,
+                year,
+                exc,
+            )
             if last_fractions is not None:
                 fractions = last_fractions
             else:
-                fractions = {k: 0.0 for k in [
-                    "p_impervious",
-                    "p_water",
-                    "p_wetland",
-                    "p_grass",
-                    "p_cultivated",
-                    "p_pasture",
-                    "p_barren",
-                ]}
+                fractions = {
+                    k: 0.0
+                    for k in [
+                        "p_impervious",
+                        "p_water",
+                        "p_wetland",
+                        "p_grass",
+                        "p_cultivated",
+                        "p_pasture",
+                        "p_barren",
+                    ]
+                }
         cache[year] = {"ndvi": ndvi_series, "fractions": fractions}
     return cache
 
