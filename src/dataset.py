@@ -26,7 +26,16 @@ class STTDataset(Dataset):
       - y_aqi / y_pm & masks
       - physics-aware graph at that hour
     """
-    def __init__(self, df, cfg, dyn_scaler=None, stat_scaler=None, fit_scalers=False, verbose=True):
+    def __init__(
+        self,
+        df,
+        cfg,
+        dyn_scaler=None,
+        stat_scaler=None,
+        target_stats=None,
+        fit_scalers=False,
+        verbose=True,
+    ):
         self.cfg = cfg
         dc = cfg["data"]
         self.time_col = dc["time_col"]
@@ -70,9 +79,17 @@ class STTDataset(Dataset):
         for j, col in enumerate(self.stat_cols):
             if col in self.df.columns:
                 m = g[col].mean()
-                stat[:,j] = self.nodes["node_id"].map(m).astype(np.float32).fillna(0.0).values
+                vals = self.nodes["node_id"].map(m)
+                if vals.isna().all():
+                    fallback = float(np.nanmean(pd.to_numeric(self.df[col], errors="coerce")))
+                else:
+                    fallback = float(np.nanmean(vals))
+                if not np.isfinite(fallback):
+                    fallback = 0.0
+                vals = vals.fillna(fallback)
+                stat[:, j] = vals.astype(np.float32).to_numpy()
             else:
-                stat[:,j] = 0.0
+                stat[:, j] = 0.0
 
         # dynamic + targets
         time2idx = {t:i for i,t in enumerate(self.times)}
@@ -97,6 +114,17 @@ class STTDataset(Dataset):
             for j, col in enumerate(self.dyn_cols):
                 cnt = int(np.isfinite(dyn[:,:,j]).sum())
                 log.info(f"  {col:12s}: {cnt}")
+
+        if fit_scalers:
+            self.target_stats = self._compute_target_stats(aqi, pm)
+        else:
+            self.target_stats = {k: dict(v) for k, v in (target_stats or {}).items()}
+            if target_stats is None and verbose:
+                log.warning("[Dataset] No target_stats supplied; targets remain unscaled.")
+
+        if self.target_stats:
+            aqi = self._standardize_target(aqi, "aqi")
+            pm = self._standardize_target(pm, "pm25")
 
         # scalers
         from src.utils import fit_scalers
@@ -180,3 +208,29 @@ class STTDataset(Dataset):
         d.mask_pm = mask_pm
         d.t_end = int(self.times[t_end])
         return d
+
+    @staticmethod
+    def _stat_summary(arr):
+        flat = arr[np.isfinite(arr)]
+        if flat.size == 0:
+            return dict(mean=0.0, std=1.0)
+        mu = float(flat.mean())
+        sd = float(flat.std(ddof=0))
+        if not np.isfinite(sd) or sd == 0.0:
+            sd = 1.0
+        return dict(mean=mu, std=sd)
+
+    def _compute_target_stats(self, aqi, pm):
+        stats = {"aqi": self._stat_summary(aqi)}
+        stats["pm25"] = self._stat_summary(pm)
+        return stats
+
+    def _standardize_target(self, arr, key):
+        stats = self.target_stats.get(key)
+        if not stats:
+            return arr
+        mu = stats.get("mean", 0.0)
+        sd = stats.get("std", 1.0)
+        if not np.isfinite(sd) or sd == 0.0:
+            sd = 1.0
+        return (arr - mu) / sd

@@ -34,8 +34,16 @@ def main():
     log.info(f"[Device] Using {device}")
 
     df = load_master(cfg)
-    ds, ss = load_scalers(cfg["outputs"]["scaler_file"])
-    full_ds = STTDataset(df, cfg, dyn_scaler=ds, stat_scaler=ss, fit_scalers=False, verbose=False)
+    ds, ss, target_stats = load_scalers(cfg["outputs"]["scaler_file"])
+    full_ds = STTDataset(
+        df,
+        cfg,
+        dyn_scaler=ds,
+        stat_scaler=ss,
+        target_stats=target_stats,
+        fit_scalers=False,
+        verbose=False,
+    )
 
     model = STTGNN(
         dyn_dim=full_ds.Ddyn,
@@ -55,13 +63,25 @@ def main():
         collate_fn=lambda x: x,
     )
     rows = []
+    def invert(arr, stats):
+        if not stats:
+            return arr
+        mu = stats.get("mean", 0.0)
+        sd = stats.get("std", 1.0)
+        if not np.isfinite(sd) or sd == 0.0:
+            sd = 1.0
+        return arr * sd + mu
+
+    aqi_stats = target_stats.get("aqi") if target_stats else None
+    pm_stats = target_stats.get("pm25") if target_stats else None
+
     with torch.no_grad():
         for batch in loader:
             for data in batch:
                 data = data.to(device)
                 aqi_hat, pm_hat = model(data.x_dyn, data.x_stat, data.edge_index, data.edge_weight)
-                aqi_np = aqi_hat.cpu().numpy()
-                pm_np  = pm_hat.cpu().numpy()
+                aqi_np = invert(aqi_hat.cpu().numpy(), aqi_stats)
+                pm_np  = invert(pm_hat.cpu().numpy(), pm_stats)
                 ids = full_ds.nodes["node_id"].tolist()
                 for i in range(len(ids)):
                     rows.append(
